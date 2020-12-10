@@ -12,6 +12,9 @@ namespace Hg.SaveHistory.API
     {
         #region Members
 
+        private static string STEAM_DELIMITER = "MANCUBUS";
+        private static string BETHESDA_DELIMITER = "PAINELEMENTAL";
+
         /// <summary>
         ///     Decrypt a file from DOOM Eternal Saves
         ///     Function taken from https://github.com/GoobyCorp/DOOMSaveManager/blob/master/Crypto.cs
@@ -56,6 +59,42 @@ namespace Hg.SaveHistory.API
             }
 
             return plaintext;
+        }
+
+        /// <summary>
+        ///     Encrypt a file for OOM Eternal Saves. 
+        ///     Function taken from https://github.com/GoobyCorp/DOOMSaveManager/blob/master/Crypto.cs
+        ///     Thank you for the reverse engineering of the save file encryption.
+        ///     TODO: convert to native .NET when possible and remove dependency
+        /// </summary>
+        /// <param name="fileKey">encryption key</param>
+        /// <param name="filePath">full path to file</param>
+        /// <returns>plain text decrypted data</returns>
+        public static byte[] DOOMEternal_Encrypt(string fileKey, string filePath) {
+            string aad = fileKey + Path.GetFileName(filePath);
+            byte[] nonce = RandomBytes(12);
+            byte[] aadBytes = Encoding.UTF8.GetBytes(aad);
+            byte[] aadHash = new SHA256Managed().ComputeHash(aadBytes);
+            
+            var cipher = new GcmBlockCipher(new AesEngine());
+            var cParams = new AeadParameters(new KeyParameter(aadHash, 0, 16), 128, nonce, aadBytes);
+            cipher.Init(true, cParams);
+            
+            byte[] data = File.ReadAllBytes(filePath);
+            byte[] encryptedData = new byte[cipher.GetOutputSize(data.Length)];
+            int retLen = cipher.ProcessBytes(data, 0, data.Length, encryptedData, 0);
+            cipher.DoFinal(encryptedData, retLen);
+
+            byte[] output = new byte[nonce.Length + encryptedData.Length];
+            Buffer.BlockCopy(nonce, 0, output, 0, nonce.Length);
+            Buffer.BlockCopy(encryptedData, 0, output, nonce.Length, encryptedData.Length);
+            return output;
+        }
+
+        private static byte[] RandomBytes(int size) {
+            byte[] output = new byte[size];
+            new Random().NextBytes(output);
+            return output;
         }
 
         #endregion

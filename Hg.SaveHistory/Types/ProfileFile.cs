@@ -75,13 +75,13 @@ namespace Hg.SaveHistory.Types
             Settings.Clear();
         }
 
-        public static bool Save(ProfileFile profile)
+        public static bool Save(ProfileFile profile, string filePath)
         {
             string content = ToJson(profile);
 
             try
             {
-                if (File.Exists(profile.FilePath))
+                if (File.Exists(filePath))
                 {
                     string backupPath = profile.FilePath + ".bak";
                     if (File.Exists(backupPath))
@@ -89,10 +89,10 @@ namespace Hg.SaveHistory.Types
                         File.Delete(backupPath);
                     }
 
-                    File.Move(profile.FilePath, backupPath);
+                    File.Move(filePath, backupPath);
                 }
 
-                File.WriteAllText(profile.FilePath, content);
+                File.WriteAllText(filePath, content);
             }
             catch (Exception exception)
             {
@@ -101,6 +101,10 @@ namespace Hg.SaveHistory.Types
             }
 
             return true;
+        }
+
+        public static bool Save(ProfileFile profile) {
+            return Save(profile, profile.FilePath);
         }
 
         public static string ToJson(ProfileFile profileFile)

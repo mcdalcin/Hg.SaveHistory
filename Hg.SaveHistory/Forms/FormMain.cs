@@ -7,6 +7,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using FontAwesome.Sharp;
@@ -888,9 +889,191 @@ namespace Hg.SaveHistory.Forms
             Logger.Information("---------------------------------------------------------------------------------");
         }
 
+        private void ExportSaves() {
+            Logger.Information(MethodBase.GetCurrentMethod().DeclaringType.Name, ".", MethodBase.GetCurrentMethod().Name);
+
+            if (_activeProfileFile == null) {
+                Logger.Information("Export saves requires an open profile.");
+                return;
+            }
+
+            // Write the encrypted save data to temp backup directory.
+            string profileName = Path.GetFileNameWithoutExtension(_activeProfileFile.FilePath);
+            string targetDirectory = _activeProfileFile.RootFolder + "\\" + profileName;
+            string backupDirectoryBase = _activeProfileFile.RootFolder + "\\temp";
+            string backupDirectory = backupDirectoryBase + "\\" + profileName;
+            Directory.CreateDirectory(backupDirectoryBase);
+            BackupDirectory(targetDirectory, backupDirectory);
+
+            // Remove any user identifiers from temp profile file and write to temp backup directory.
+            string tempProfileFilePath = backupDirectoryBase + "\\" + Path.GetFileName(_activeProfileFile.FilePath);
+            ProfileFile tempProfileFile = ProfileFile.Load(_activeProfileFile.FilePath);
+            PruneUserIdentifiers(tempProfileFile);
+            ProfileFile.Save(tempProfileFile, tempProfileFilePath);
+
+            // Decrypt all files within the backup directory.
+            ProfileSettingString userIdentifierSetting = (ProfileSettingString)_activeProfileFile.Settings.FirstOrDefault(setting => setting.Name == "UserIdentifier");
+            var filePaths = 
+                Directory.GetFiles(backupDirectory, "*.*", SearchOption.AllDirectories)
+                .Where(file => Path.GetFileName(file) == "game_duration.dat" || Path.GetFileName(file) == "game.details");
+            foreach (string filePath in filePaths) {
+                string decryptedFileData = HgScriptSpecific.DOOMEternal_Decrypt(getEncryptionKeyBase(true, userIdentifierSetting.Value) + Path.GetFileName(filePath), filePath);
+                File.WriteAllText(filePath, decryptedFileData);
+            }
+
+            // Finally, zip up and then remove the temp backup directory.
+            ZipFile.CreateFromDirectory(backupDirectoryBase, _activeProfileFile.RootFolder + "\\" + profileName + ".zip");
+            Directory.Delete(backupDirectoryBase, true);
+        }
+
+        /** Removes any user identifiers from a profile. */
+        private static void PruneUserIdentifiers(ProfileFile profile) {
+            profile.FilePath = "";
+            profile.RootFolder = "";
+            ProfileSettingString userIdentifierSetting = (ProfileSettingString)profile.Settings.FirstOrDefault(setting => setting.Name == "UserIdentifier");
+            ProfileSettingString sourceFolderSetting = (ProfileSettingString)profile.Settings.FirstOrDefault(setting => setting.Name == "SourceFolder");
+            userIdentifierSetting.Value = "";
+            sourceFolderSetting.Value = "";
+        }
+
+        private void BackupDirectory(string sourceDirectory, string backupDirectory) {
+            // First create all directories.
+            foreach (string directory in Directory.GetDirectories(sourceDirectory, "*", SearchOption.AllDirectories)) {
+                Directory.CreateDirectory(directory.Replace(sourceDirectory, backupDirectory));
+            }
+
+            // Now backup all files.
+            foreach (string filePath in Directory.GetFiles(sourceDirectory, "*.*", SearchOption.AllDirectories)) {
+                File.Copy(filePath, filePath.Replace(sourceDirectory, backupDirectory), true);
+            }
+        }
+
+        private void ImportSavesDialog() {
+            Logger.Information(MethodBase.GetCurrentMethod().DeclaringType.Name, ".", MethodBase.GetCurrentMethod().Name);
+
+            if (importSavesDialog.ShowDialog(this) != DialogResult.OK) {
+                return;
+            }
+
+            string filePath = importSavesDialog.FileName;
+            string fileName = Path.GetFileNameWithoutExtension(filePath);
+            string directoryPath = Path.GetDirectoryName(filePath);
+
+            // Unzip saves.
+            ZipFile.ExtractToDirectory(filePath, directoryPath);
+            Logger.Information("Extracting " + filePath);
+
+            // Search for the profile file.
+            string profilePath = directoryPath + "\\" + fileName + ".shp";
+            Logger.Information("Search for profile at: " + profilePath);
+            if (!File.Exists(profilePath)) {
+                Logger.Information("Profile not found.");
+                return;
+            } 
+            Logger.Information("Found profile.");
+            ProfileFile profileFile = ProfileFile.Load(profilePath);
+
+            // Attempt to auto-detect source folder.
+            string sourceFolderPath = AutoDetectSourceFolder(profileFile.EngineScriptName);
+            if (sourceFolderPath.Length == 0) {
+                Logger.Information("Auto-detected source folder is empty. Aborting.");
+                return;
+            }
+
+            // Fill in user-specific info.
+            ProfileSettingString userIdentifierSetting = (ProfileSettingString)profileFile.Settings.FirstOrDefault(setting => setting.Name == "UserIdentifier");
+            ProfileSettingString sourceFolderSetting = (ProfileSettingString)profileFile.Settings.FirstOrDefault(setting => setting.Name == "SourceFolder");
+            profileFile.FilePath = profilePath;
+            profileFile.RootFolder = directoryPath;
+            userIdentifierSetting.Value = getUserIdentifier(true, sourceFolderPath);
+            sourceFolderSetting.Value = sourceFolderPath;
+
+            // Overwrite the profile with new information.
+            ProfileFile.Save(profileFile);
+
+            // Encrypt all game saves with new user-specific info.
+            string rootDirectory = directoryPath + "\\" + fileName;
+            EncryptGameSaves(rootDirectory, getEncryptionKeyBase(true, userIdentifierSetting.Value));
+            Logger.Information("Imported game saves successfully.");
+        }
+
+        /** 
+         * Tries to auto-detect the source folder for the specified engineName. 
+         *
+         * Returns the source folder path or an empty string if no folder is found.
+         */
+        private string AutoDetectSourceFolder(String engineName) {
+            EngineScript engineScript = _engineScriptManager.BackupEngines.FirstOrDefault(e => e.Name == engineName);
+
+            if (engineScript == null) {
+                Logger.Information("Unable to create engine. No engineScript found.");
+                return "";
+            }
+
+            LuaManager tempLuaManager = new LuaManager();
+            tempLuaManager.LoadEngine(engineScript);
+            foreach (var setting in tempLuaManager.ActiveEngine.Settings.Where(s => s.Kind == EngineSettingKind.Setup)) {
+                if (setting is EngineSettingFolderBrowser settingFolder) {
+                    if (!settingFolder.CanAutoDetect) {
+                        Logger.Information("Engine unable to auto-detect save directory. Aborting.");
+                        return "";
+                    }
+                    if (settingFolder.OnAutoDetect?.Call().First() is string result) {
+                        return result;
+                    }
+                }
+            }
+
+            return "";
+        }
+
+        private static void EncryptGameSaves(string currentDirectory, String encryptionKeyBase) {
+            foreach (string directory in Directory.GetDirectories(currentDirectory)) {
+                EncryptGameSaves(directory, encryptionKeyBase);
+            }
+
+            string[] filesToEncrypt = { "game.details", "game_duration.dat" };
+            // Look for game.details and game_duration.dat files.
+            foreach (string fileName in filesToEncrypt) {
+                string filePath = currentDirectory + fileName;
+                if (File.Exists(currentDirectory + fileName)) {
+                    byte[] encryptedData = HgScriptSpecific.DOOMEternal_Encrypt(encryptionKeyBase + fileName, filePath);
+                    // Overwrite previous file with its encrypted version.
+                    File.Delete(filePath);
+                    File.WriteAllBytes(filePath, encryptedData);
+                }
+            }
+        }
+
+        private static string getUserIdentifier(bool isSteam, string savePath) {
+            if (isSteam) {
+                return Regex.Match(savePath, "userdata\\\\([0-9]+)\\\\782330").Groups[1].Value;
+            } else {
+                return "TODO: BETHESDA";
+            }
+        }
+
+        private static string getEncryptionKeyBase(bool isSteam, string userIdentifier) {
+            if (isSteam) {
+                string steam64Id = HgSteamHelper.SteamId3ToSteamId64(userIdentifier);
+                return steam64Id + "MANCUBUS";
+            } else {
+                return userIdentifier + "PAINELEMENTAL";
+            }
+        }
+
         private void closeProfileToolStripMenuItem_Click(object sender, EventArgs e)
         {
             CloseProfile();
+        }
+
+        private void exportSavesToolStripMenuItem_Click(object sender, EventArgs e) {
+            ExportSaves();
+        }
+
+        private void importSavesToolStripMenuItem_Click(object sender, EventArgs e) 
+        {
+            ImportSavesDialog();
         }
 
         private void comboBoxCategories_SelectionChangeCommitted(object sender, EventArgs e)
@@ -1751,6 +1934,10 @@ namespace Hg.SaveHistory.Forms
             {
                 Cursor.Current = Cursors.Default;
             }
+        }
+
+        private void ImportSaves() {
+
         }
 
         private void OpenProfileDialog()
@@ -2774,6 +2961,10 @@ namespace Hg.SaveHistory.Forms
         {
 
 
+
+        }
+
+        private void toolStripMenuItem1_Click(object sender, EventArgs e) {
 
         }
     }

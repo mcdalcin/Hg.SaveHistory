@@ -499,7 +499,7 @@ engine.OnInitialized = function()
     slotPath = Path.Combine(sourceFolder, slotFolderName)
     Logger.Debug("slotPath=" .. slotPath)
 
-    userIdentifier =  engine:SettingByName("UserIdentifier").Value
+    userIdentifier = engine:SettingByName("UserIdentifier").Value
     Logger.Debug("userIdentifier=" .. userIdentifier)
 
     if platform == 1 then
